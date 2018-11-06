@@ -25,7 +25,7 @@ namespace BigDataTiler
         public DateTimeOffset TimeOfCreation { get; set; }
 
         [JsonProperty("JsTimeOfCreation")]
-        public ulong JsTimeOfCreation { get; set; }
+        public long JsTimeOfCreation { get; set; }
         [JsonProperty("ZippedLog")]
         public byte[] ZippedLog { get; set; }
         public void loadXmlFile(XmlDocument xmlDoc)

@@ -66,7 +66,7 @@ namespace BigDataTiler
             retValue.UserId = loadedDocument.GetPropertyValue<string>("UserId");
             retValue.TypeOfEvent = loadedDocument.GetPropertyValue<string>("TypeOfEvent");
             retValue.TimeOfCreation = loadedDocument.GetPropertyValue<DateTimeOffset>("TimeOfCreation");
-            retValue.JsTimeOfCreation = loadedDocument.GetPropertyValue<ulong>("JsTimeOfCreation");
+            retValue.JsTimeOfCreation = loadedDocument.GetPropertyValue<long>("JsTimeOfCreation");
             this.loadedDocument = retValue;
             return retValue;
         }
