@@ -17,8 +17,10 @@ namespace BigDataTiler
     public class BigDataLogControl
     {
         private static bool isLocal = Environment.GetEnvironmentVariable("TILER_ENV") == "local";
-        private static string EndpointUrl = "https://tiler-event-log.documents.azure.com:443/";
-        private static string dbName = isLocal ? "OtherBigDataDB" : "TilerBigDataDB";
+        private static bool isStaging = Environment.GetEnvironmentVariable("TILER_ENV") == "staging";
+        private static string defaultEndPointUri = "https://tiler-event-log.documents.azure.com:443/";
+        private static string EndpointUrl = isLocal ? BigDataLogControl.defaultEndPointUri : BigDataLogControl.defaultEndPointUri;
+        private static string dbName = isLocal ? "LocalTilerBigDataDB" : isStaging ? "TilerBigDataDB" : "OtherBigDataDB";
         private static string collectionName = "UserLogs";
         private static string partitionKey = "/UserId";
         private static int OfferThroughput = 400;
