@@ -31,8 +31,6 @@ namespace BigDataTiler
         public void loadXmlFile(XmlDocument xmlDoc)
         {
             byte[] retValue = null;
-            MemoryStream ms;
-
             //MemoryStream textFileStream = new MemoryStream();
             
 
@@ -41,9 +39,9 @@ namespace BigDataTiler
                 {
                     using (var archive = new ZipArchive(memoryStream, ZipArchiveMode.Create, true))
                     {
-                        var demoFile = archive.CreateEntry(this.TimeOfCreation.toJSMilliseconds().ToString() + ".xml", CompressionLevel.Optimal);
+                        var zipFile = archive.CreateEntry(this.TimeOfCreation.toJSMilliseconds().ToString() + ".xml", CompressionLevel.Optimal);
 
-                        using (var entryStream = demoFile.Open())
+                        using (var entryStream = zipFile.Open())
                         {
                             //textFileStream.CopyTo(entryStream);
                             xmlDoc.Save(entryStream);
