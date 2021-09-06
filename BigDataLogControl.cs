@@ -1,7 +1,4 @@
-﻿using Microsoft.Azure.Documents;
-using Microsoft.Azure.Documents.Client;
-using Microsoft.Azure.Documents.Linq;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Configuration;
 using System.IO;
@@ -10,7 +7,9 @@ using System.Text;
 using System.Threading.Tasks;
 using TilerElements;
 using Newtonsoft;
+using Microsoft.Azure.Cosmos;
 using static TilerElements.UserActivity;
+
 
 namespace BigDataTiler
 {
@@ -25,11 +24,11 @@ namespace BigDataTiler
         private static string partitionKey = "/UserId";
         private static int OfferThroughput = 400;
         private string PrimaryKey = isLocal ? ConfigurationManager.AppSettings["azureDocumentDbKeyLocal"] :ConfigurationManager.AppSettings["azureDocumentDbKey"];
-        private DocumentClient Client;
+        private CosmosClient Client;
         public LogChange loadedDocument { get; set; }
         public BigDataLogControl()
         {
-            Client = new DocumentClient(new Uri(EndpointUrl), PrimaryKey);
+            Client = new CosmosClient(EndpointUrl, PrimaryKey);
         }
 
         public async Task createAzureDocumentDatabase()
@@ -38,35 +37,63 @@ namespace BigDataTiler
         }
         public static async Task createAzureDocumentDatabase(string EndpointUrl, string PrimaryKey)
         {
-            DocumentClient client = new DocumentClient(new Uri(EndpointUrl), PrimaryKey);
-            Database dataBase = new Database { Id = dbName };
-            await client.CreateDatabaseIfNotExistsAsync(dataBase).ConfigureAwait(false);
-            DocumentCollection myCollection = new DocumentCollection();
-            myCollection.Id = collectionName;
-            myCollection.PartitionKey.Paths.Add(partitionKey);
-            await client.CreateDocumentCollectionIfNotExistsAsync(
-                UriFactory.CreateDatabaseUri(dbName),
-                myCollection,
-                new RequestOptions { OfferThroughput = OfferThroughput }).ConfigureAwait(false);
+            var client = new CosmosClient(EndpointUrl, PrimaryKey);
+            DatabaseResponse databaseResponse = await client.CreateDatabaseIfNotExistsAsync(dbName);
+            Database database = databaseResponse;
+            DatabaseProperties databaseProperties = databaseResponse;
+
+            // Create a database with a shared manual provisioned throughput
+            string databaseIdManual = dbName;
+            database = await client.CreateDatabaseIfNotExistsAsync(databaseIdManual, ThroughputProperties.CreateManualThroughput(OfferThroughput));
+
+            ContainerResponse container = await database.CreateContainerIfNotExistsAsync(
+                id: collectionName,
+                partitionKeyPath: partitionKey,
+                throughput: OfferThroughput);
+
+
+
+
+            //Database dataBase = new Database { Id = dbName };
+            //await client.CreateDatabaseIfNotExistsAsync(dataBase).ConfigureAwait(false);
+            //DocumentCollection myCollection = new DocumentCollection();
+            //myCollection.Id = collectionName;
+            //myCollection.PartitionKey.Paths.Add(partitionKey);
+            //await client.CreateDocumentCollectionIfNotExistsAsync(
+            //    UriFactory.CreateDatabaseUri(dbName),
+            //    myCollection,
+            //    new RequestOptions { OfferThroughput = OfferThroughput }).ConfigureAwait(false);
         }
         public async Task AddLogDocument(LogChange log)
         {
-            await Client.CreateDocumentAsync(UriFactory.CreateDocumentCollectionUri(dbName, collectionName), log).ConfigureAwait(false);
+            string cosmosDBName = dbName;
+            string containerName = collectionName;
+            var database = Client.GetDatabase(cosmosDBName);
+            Container container = database.GetContainer(containerName);
+
+            ItemResponse<LogChange> response = await container.CreateItemAsync(log, new PartitionKey(log.UserId)).ConfigureAwait(false);
+            //await Client.CreateDocumentAsync(UriFactory.CreateDocumentCollectionUri(dbName, collectionName), log).ConfigureAwait(false);
         }
 
-        async Task<Document> loadDocument(string userId, string documentId)
+        async Task<LogChange> loadDocument(string userId, string documentId)
         {
-            RequestOptions options = new RequestOptions { PartitionKey = new PartitionKey(userId) };
-            Uri uri = UriFactory.CreateDocumentUri(dbName, collectionName, documentId);
-            Document retrievedDocument = await Client.ReadDocumentAsync(uri, options).ConfigureAwait(false);
-            return retrievedDocument;
+            var database = Client.GetDatabase(dbName);
+            Container container = database.GetContainer(collectionName);
+            ItemResponse<LogChange> response = await container.ReadItemAsync<LogChange>(documentId, new PartitionKey(userId)).ConfigureAwait(false);
+            return response;
+
+
+            //RequestOptions options = new RequestOptions { PartitionKey = new PartitionKey(userId) };
+            //Uri uri = UriFactory.CreateDocumentUri(dbName, collectionName, documentId);
+            //Document retrievedDocument = await Client.ReadDocumentAsync(uri, options).ConfigureAwait(false);
+            //return retrievedDocument;
         }
 
         public async Task<IEnumerable<LogChange>> getLogChangesByType(string userId, TimeLine timeLineArg = null, ActivityType typeOfDocument = ActivityType.None, int count = 100)
         {
-            FeedOptions options = new FeedOptions { PartitionKey = new PartitionKey(userId) };
-            var documentCollectionUri = UriFactory.CreateDocumentCollectionUri(dbName, collectionName);
-            var collectionParams = new List<SqlParameter>();
+            var options = new QueryRequestOptions { PartitionKey = new PartitionKey(userId) };
+            
+            var collectionParams = new List<Tuple<string, object>>();
             string sqlQuery = @"SELECT * FROM c";
             bool isWhereAlready = false;
             TimeLine timeline = timeLineArg.StartToEnd;
@@ -82,7 +109,7 @@ namespace BigDataTiler
                 {
                     sqlQuery += " AND ";
                 }
-                var sqlParam = new SqlParameter { Name = "@UserId", Value = userId };
+                var sqlParam = new Tuple<string, object> ("@UserId",userId);
                 collectionParams.Add(sqlParam);
                 sqlQuery += @" c.UserId = @UserId ";
             }
@@ -98,7 +125,7 @@ namespace BigDataTiler
                 {
                     sqlQuery += " AND ";
                 }
-                var sqlParam = new SqlParameter { Name = "@TypeOfEvent", Value = typeOfDocument.ToString() };
+                var sqlParam = new Tuple<string, object>("@TypeOfEvent", typeOfDocument.ToString());
                 collectionParams.Add(sqlParam);
                 sqlQuery += " c.TypeOfEvent = @TypeOfEvent ";
             }
@@ -115,65 +142,99 @@ namespace BigDataTiler
                     sqlQuery += " AND ";
                 }
 
-                var sqlParamStart = new SqlParameter { Name = "@JsTimeOfCreationStart", Value = timeline.Start.ToUnixTimeMilliseconds() };
+                var sqlParamStart = new Tuple<string, object>("@JsTimeOfCreationStart", timeline.Start.ToUnixTimeMilliseconds());
                 collectionParams.Add(sqlParamStart);
-                var sqlParamEnd = new SqlParameter { Name = "@JsTimeOfCreationEnd", Value = timeline.End.ToUnixTimeMilliseconds() };
+                var sqlParamEnd = new Tuple<string, object>("@JsTimeOfCreationEnd", timeline.End.ToUnixTimeMilliseconds());
                 collectionParams.Add(sqlParamEnd);
                 sqlQuery += " c.JsTimeOfCreation >= @JsTimeOfCreationStart and c.JsTimeOfCreation < @JsTimeOfCreationEnd ";
             }
 
+
             sqlQuery += @" order by  c.JsTimeOfCreation desc ";
             sqlQuery += @" offset 0 limit "+count +" ";
 
-            var querySpec = new SqlQuerySpec
-            {
-                QueryText = sqlQuery,
-                Parameters = new SqlParameterCollection(
-                    collectionParams
-                )
-            };
-           
 
-            var query = Client.CreateDocumentQuery<Document>(documentCollectionUri, querySpec, options).AsDocumentQuery();
+            QueryDefinition queryDefinition = new QueryDefinition(sqlQuery);
+            collectionParams.ForEach((param) =>
+            {
+                queryDefinition = queryDefinition.WithParameter(param.Item1, param.Item2);
+            });
+
+            var database = Client.GetDatabase(dbName);
+            Container container = database.GetContainer(collectionName);
+
             List<LogChange> retValue = new List<LogChange>();
-
-            while (query.HasMoreResults)
+            using (FeedIterator<LogChange> resultSet = container.GetItemQueryIterator<LogChange>(
+            queryDefinition,
+            requestOptions: new QueryRequestOptions()
             {
-                var documents = await query.ExecuteNextAsync<Document>().ConfigureAwait(false);
-                foreach (var loadedDocument in documents)
+                PartitionKey = new PartitionKey("Account1"),
+                MaxItemCount = 1
+            }))
                 {
-                    LogChange logChange = new LogChange();
-                    byte[] allBytesbefore = loadedDocument.GetPropertyValue<byte[]>("ZippedLog");
-                    logChange.ZippedLog = allBytesbefore;
-                    logChange.Id = loadedDocument.GetPropertyValue<string>("Id");
-                    logChange.UserId = loadedDocument.GetPropertyValue<string>("UserId");
-                    logChange.TypeOfEvent = loadedDocument.GetPropertyValue<string>("TypeOfEvent");
-                    logChange.TimeOfCreation = loadedDocument.GetPropertyValue<DateTimeOffset>("TimeOfCreation");
-                    logChange.JsTimeOfCreation = loadedDocument.GetPropertyValue<ulong>("JsTimeOfCreation");
-                    retValue.Add(logChange);
+                    while (resultSet.HasMoreResults)
+                    {
+                        FeedResponse<LogChange> response = await resultSet.ReadNextAsync();
+                        LogChange logChange = response.First();
+                        Console.WriteLine($"\n Log change UserId is : {logChange.UserId}; Id: {logChange.Id};");
+                        retValue.AddRange(response);
+                    }
                 }
-            }
+
+
+            //var querySpec = new SqlQuerySpec
+            //{
+            //    QueryText = sqlQuery,
+            //    Parameters = new SqlParameterCollection(
+            //        collectionParams
+            //    )
+            //};
+
+            
+
+            //var documentCollectionUri = UriFactory.CreateDocumentCollectionUri(dbName, collectionName);
+            //var query = Client.CreateDocumentQuery<Document>(documentCollectionUri, querySpec, options).AsDocumentQuery();
+            //List<LogChange> retValue = new List<LogChange>();
+
+            //while (query.HasMoreResults)
+            //{
+            //    var documents = await query.ExecuteNextAsync<Document>().ConfigureAwait(false);
+            //    foreach (var loadedDocument in documents)
+            //    {
+            //        LogChange logChange = new LogChange();
+            //        byte[] allBytesbefore = loadedDocument.GetPropertyValue<byte[]>("ZippedLog");
+            //        logChange.ZippedLog = allBytesbefore;
+            //        logChange.Id = loadedDocument.GetPropertyValue<string>("Id");
+            //        logChange.UserId = loadedDocument.GetPropertyValue<string>("UserId");
+            //        logChange.TypeOfEvent = loadedDocument.GetPropertyValue<string>("TypeOfEvent");
+            //        logChange.TimeOfCreation = loadedDocument.GetPropertyValue<DateTimeOffset>("TimeOfCreation");
+            //        logChange.JsTimeOfCreation = loadedDocument.GetPropertyValue<ulong>("JsTimeOfCreation");
+            //        retValue.Add(logChange);
+            //    }
+            //}
             return retValue;
         }
 
-        public LogChange getLogChange(Document loadedDocument)
-        {
-            LogChange retValue = new LogChange();
-            byte[] allBytesbefore = loadedDocument.GetPropertyValue<byte[]>("ZippedLog");
-            retValue.ZippedLog = allBytesbefore;
-            retValue.Id = loadedDocument.GetPropertyValue<string>("Id");
-            retValue.UserId = loadedDocument.GetPropertyValue<string>("UserId");
-            retValue.TypeOfEvent = loadedDocument.GetPropertyValue<string>("TypeOfEvent");
-            retValue.TimeOfCreation = loadedDocument.GetPropertyValue<DateTimeOffset>("TimeOfCreation");
-            retValue.JsTimeOfCreation = loadedDocument.GetPropertyValue<ulong>("JsTimeOfCreation");
-            this.loadedDocument = retValue;
-            return retValue;
-        }
+        //public LogChange getLogChange(Document loadedDocument)
+        //{
+        //    LogChange retValue = new LogChange();
+        //    byte[] allBytesbefore = loadedDocument.GetPropertyValue<byte[]>("ZippedLog");
+        //    retValue.ZippedLog = allBytesbefore;
+        //    retValue.Id = loadedDocument.GetPropertyValue<string>("Id");
+        //    retValue.UserId = loadedDocument.GetPropertyValue<string>("UserId");
+        //    retValue.TypeOfEvent = loadedDocument.GetPropertyValue<string>("TypeOfEvent");
+        //    retValue.TimeOfCreation = loadedDocument.GetPropertyValue<DateTimeOffset>("TimeOfCreation");
+        //    retValue.JsTimeOfCreation = loadedDocument.GetPropertyValue<ulong>("JsTimeOfCreation");
+        //    this.loadedDocument = retValue;
+        //    return retValue;
+        //}
 
         public async Task<LogChange> getLogChange(string userId, string documentId)
         {
-            Document loadedDocument = await loadDocument(userId, documentId).ConfigureAwait(false);
-            return getLogChange(loadedDocument);
+            LogChange retValue= await loadDocument(userId, documentId).ConfigureAwait(false);
+            return retValue;
+            //Document loadedDocument = await loadDocument(userId, documentId).ConfigureAwait(false);
+            //return getLogChange(loadedDocument);
         }
 
         public async Task writeDocumentTofile(byte[] bytes, string fullZipPathName)
