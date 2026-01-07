@@ -15,7 +15,7 @@ namespace BigDataTiler
 {
     public class BigDataLogControl
     {
-        private static bool isLocal = Environment.GetEnvironmentVariable("TILER_ENV") == "local";
+        private static bool isLocal = false && Environment.GetEnvironmentVariable("TILER_ENV") == "local";
         private static bool isStaging = Environment.GetEnvironmentVariable("TILER_ENV") == "staging";
         private static string defaultEndPointUri = "https://tiler-event-log.documents.azure.com:443/";
         private static string EndpointUrl = isLocal ? BigDataLogControl.defaultEndPointUri : BigDataLogControl.defaultEndPointUri;
@@ -73,6 +73,120 @@ namespace BigDataTiler
 
             ItemResponse<LogChange> response = await container.CreateItemAsync(log, new PartitionKey(log.UserId)).ConfigureAwait(false);
             //await Client.CreateDocumentAsync(UriFactory.CreateDocumentCollectionUri(dbName, collectionName), log).ConfigureAwait(false);
+        }
+        
+        /// <summary>
+        /// Adds multiple LogChange documents to Cosmos DB (handles split documents)
+        /// </summary>
+        /// <param name="logDocuments">List of LogChange documents to add</param>
+        /// <returns>The ID of the first/parent document</returns>
+        public async Task<string> AddLogDocuments(List<LogChange> logDocuments)
+        {
+            if (logDocuments == null || logDocuments.Count == 0)
+            {
+                throw new ArgumentException("logDocuments cannot be null or empty");
+            }
+            
+            string cosmosDBName = dbName;
+            string containerName = collectionName;
+            var database = Client.GetDatabase(cosmosDBName);
+            Container container = database.GetContainer(containerName);
+            
+            string parentId = logDocuments[0].Id;
+            
+            foreach (var log in logDocuments)
+            {
+                try
+                {
+                    ItemResponse<LogChange> response = await container.CreateItemAsync(log, new PartitionKey(log.UserId)).ConfigureAwait(false);
+                    System.Diagnostics.Trace.WriteLine($"Added LogChange document {log.Id} (split {log.SplitIndex + 1}/{log.TotalSplits}), size: {log.ZippedLog?.Length ?? 0} bytes");
+                }
+                catch (CosmosException ex) when (ex.StatusCode == System.Net.HttpStatusCode.RequestEntityTooLarge)
+                {
+                    System.Diagnostics.Trace.TraceError($"Document {log.Id} still too large ({log.ZippedLog?.Length ?? 0} bytes): {ex.Message}");
+                    throw;
+                }
+            }
+            
+            return parentId;
+        }
+        
+        /// <summary>
+        /// Retrieves all split parts of a LogChange document and combines them
+        /// </summary>
+        /// <param name="userId">User ID for partition key</param>
+        /// <param name="parentDocumentId">ID of the first/parent document</param>
+        /// <returns>Combined LogChange with full XML content</returns>
+        public async Task<LogChange> GetCombinedLogChange(string userId, string parentDocumentId)
+        {
+            var database = Client.GetDatabase(dbName);
+            Container container = database.GetContainer(collectionName);
+            
+            // First, get the parent document
+            LogChange parentLog = await loadDocument(userId, parentDocumentId).ConfigureAwait(false);
+            
+            // If it's not split, return as-is
+            if (parentLog.TotalSplits <= 1)
+            {
+                return parentLog;
+            }
+            
+            // Query for all split parts
+            string sqlQuery = @"SELECT * FROM c WHERE c.UserId = @UserId AND (c.id = @ParentId OR c.ParentLogId = @ParentId) ORDER BY c.SplitIndex";
+            QueryDefinition queryDefinition = new QueryDefinition(sqlQuery)
+                .WithParameter("@UserId", userId)
+                .WithParameter("@ParentId", parentDocumentId);
+            
+            List<LogChange> splitParts = new List<LogChange>();
+            using (FeedIterator<LogChange> resultSet = container.GetItemQueryIterator<LogChange>(
+                queryDefinition,
+                requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey(userId) }))
+            {
+                while (resultSet.HasMoreResults)
+                {
+                    FeedResponse<LogChange> response = await resultSet.ReadNextAsync().ConfigureAwait(false);
+                    splitParts.AddRange(response);
+                }
+            }
+            
+            // Use LogChange's simple string concatenation to combine
+            string combinedXml = LogChange.CombineSplitLogs(splitParts);
+            
+            if (string.IsNullOrEmpty(combinedXml))
+            {
+                return parentLog;
+            }
+            
+            // Create combined LogChange with the full XML
+            LogChange combinedLog = new LogChange
+            {
+                Id = parentLog.Id,
+                UserId = parentLog.UserId,
+                TypeOfEvent = parentLog.TypeOfEvent,
+                Trigger = parentLog.Trigger,
+                TimeOfCreation = parentLog.TimeOfCreation,
+                JsTimeOfCreation = parentLog.JsTimeOfCreation,
+                SplitIndex = 0,
+                TotalSplits = 1,
+                ParentLogId = null
+            };
+            
+            // Re-zip the combined content
+            using (var memoryStream = new MemoryStream())
+            {
+                using (var archive = new System.IO.Compression.ZipArchive(memoryStream, System.IO.Compression.ZipArchiveMode.Create, true))
+                {
+                    var zipEntry = archive.CreateEntry(parentLog.TimeOfCreation.toJSMilliseconds().ToString() + ".xml", System.IO.Compression.CompressionLevel.Optimal);
+                    using (var entryStream = zipEntry.Open())
+                    using (var writer = new StreamWriter(entryStream, Encoding.UTF8))
+                    {
+                        writer.Write(combinedXml);
+                    }
+                }
+                combinedLog.ZippedLog = memoryStream.ToArray();
+            }
+            
+            return combinedLog;
         }
 
         async Task<LogChange> loadDocument(string userId, string documentId)
