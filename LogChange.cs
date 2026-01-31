@@ -304,6 +304,15 @@ namespace BigDataTiler
             
             return null;
         }
+
+        /// <summary>
+        /// Extracts the XML string from this LogChange's ZippedLog.
+        /// Instance method for convenience.
+        /// </summary>
+        public string ExtractXmlString()
+        {
+            return ExtractStringFromZip(this.ZippedLog);
+        }
         
         /// <summary>
         /// Combines multiple split LogChange objects back into a single XML string.
